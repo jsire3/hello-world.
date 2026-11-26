@@ -1,0 +1,15 @@
+# Windows version resource for Doc2Word.exe (shown in file Properties > Details).
+# Keep in sync with doc2word/__init__.py (build.ps1 checks this).
+VSVersionInfo(
+  ffi=FixedFileInfo(filevers=(0, 1, 0, 0), prodvers=(0, 1, 0, 0)),
+  kids=[
+    StringFileInfo([StringTable('040904B0', [
+      StringStruct('FileDescription', 'Doc2Word - Convert to Word'),
+      StringStruct('ProductName', 'Doc2Word'),
+      StringStruct('FileVersion', '0.1.0'),
+      StringStruct('ProductVersion', '0.1.0'),
+      StringStruct('OriginalFilename', 'Doc2Word.exe'),
+    ])]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])]),
+  ]
+)

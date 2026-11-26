@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "doc2word"
+dynamic = ["version"]
+description = "Convert PDFs, images and Office files into editable Word documents - offline, on Windows."
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6-Essentials>=6.7",
+    "pymupdf>=1.24",
+    "python-docx>=1.1",
+    "Pillow>=10.0",
+    "pillow-heif>=0.16",
+    "psutil>=5.9",
+    "pywin32>=306; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyinstaller>=6.6"]
+
+[project.scripts]
+doc2word-cli = "doc2word.cli:main"
+
+[project.gui-scripts]
+doc2word = "doc2word.app:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "doc2word.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["doc2word*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests", "."]

@@ -1,0 +1,60 @@
+name: Build Windows installer
+
+on:
+  push:
+    branches: [master, "claude/**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q
+
+      - name: Package app (PyInstaller)
+        run: |
+          python packaging\make_icon.py packaging\doc2word.ico
+          pyinstaller packaging\doc2word.spec --noconfirm --clean
+
+      - name: Smoke-test the packaged app
+        shell: pwsh
+        run: |
+          # The runner has no Microsoft Office, so test the image path,
+          # which proves the packaged exe, Qt-free CLI, PyMuPDF, Pillow and python-docx all load.
+          python -c "from PIL import Image; Image.new('RGB',(800,1100),'white').save('smoke.png')"
+          .\dist\Doc2Word\doc2word-cli.exe smoke.png --out smoke_out
+          if (-not (Test-Path smoke_out\smoke.docx)) { throw "smoke test produced no .docx" }
+          .\dist\Doc2Word\doc2word-cli.exe --version
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+          $version = (python -c "import doc2word; print(doc2word.__version__)").Trim()
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" packaging\installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Doc2Word-installer
+          path: dist/Doc2Word-Setup-*.exe
+          retention-days: 30
