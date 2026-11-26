@@ -6,17 +6,34 @@ on:
   pull_request:
   workflow_dispatch:
 
+# The repository name ends in a dot ("hello-world."). Windows strips trailing
+# dots from folder names, so the default workspace folder - and therefore
+# actions/checkout - doesn't work. We clone into C:\build and run there.
+defaults:
+  run:
+    shell: pwsh
+    working-directory: C:\build
+
 jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out (into C:\build)
+        working-directory: C:\
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          git init -q C:\build
+          cd C:\build
+          $auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("x-access-token:$env:TOKEN"))
+          git -c "http.extraheader=AUTHORIZATION: basic $auth" fetch -q --depth 1 "https://github.com/${{ github.repository }}.git" "${{ github.sha }}"
+          git checkout -q FETCH_HEAD
+          git log -1 --oneline
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
 
       - name: Install
         run: |
@@ -32,19 +49,23 @@ jobs:
         run: |
           python packaging\make_icon.py packaging\doc2word.ico
           pyinstaller packaging\doc2word.spec --noconfirm --clean
+          if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
 
       - name: Smoke-test the packaged app
-        shell: pwsh
         run: |
-          # The runner has no Microsoft Office, so test the image path,
-          # which proves the packaged exe, Qt-free CLI, PyMuPDF, Pillow and python-docx all load.
+          # The runner has no Microsoft Office, so:
+          #  - an image exercises the packaged Pillow + python-docx path;
+          #  - a PDF goes to pdf2docx in a background process, which proves
+          #    multiprocessing works inside the frozen .exe.
           python -c "from PIL import Image; Image.new('RGB',(800,1100),'white').save('smoke.png')"
-          .\dist\Doc2Word\doc2word-cli.exe smoke.png --out smoke_out
-          if (-not (Test-Path smoke_out\smoke.docx)) { throw "smoke test produced no .docx" }
+          python -c "import pymupdf; d=pymupdf.open(); p=d.new_page(); p.insert_text((72,72),'Smoke test PDF with some text in it.'); d.save('smoke.pdf')"
+          .\dist\Doc2Word\doc2word-cli.exe smoke.png smoke.pdf --out smoke_out
+          foreach ($f in 'smoke.docx', 'smoke (1).docx') {
+            if (-not (Test-Path "smoke_out\$f")) { throw "smoke test produced no $f" }
+          }
           .\dist\Doc2Word\doc2word-cli.exe --version
 
       - name: Build installer (Inno Setup)
-        shell: pwsh
         run: |
           if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
             choco install innosetup -y --no-progress
@@ -56,5 +77,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: Doc2Word-installer
-          path: dist/Doc2Word-Setup-*.exe
+          path: C:\build\dist\Doc2Word-Setup-*.exe
           retention-days: 30
+          if-no-files-found: error

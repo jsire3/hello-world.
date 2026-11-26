@@ -20,7 +20,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable
 
-from .converter import Converter, Result
+from .converter import Converter, PdfMode, Result
 from .engines.base import ConversionError
 
 log = logging.getLogger(__name__)
@@ -42,6 +42,7 @@ class Job:
     id: int
     src: Path
     out_dir: Path | None
+    pdf_mode: PdfMode = PdfMode.BEST
     state: State = State.QUEUED
     message: str = ""
     result: Result | None = None
@@ -67,10 +68,13 @@ class ConversionQueue:
         on_update: Callback,
         session_factory: SessionFactory = default_session_factory,
         timeout_s: float = DEFAULT_TIMEOUT_S,
+        alt_dir: Path | None = None,
     ):
         self._on_update = on_update
         self._session_factory = session_factory
         self._timeout_s = timeout_s
+        self._alt_dir = alt_dir
+        self._converter: Converter | None = None
         self._q: queue.Queue[Job | None] = queue.Queue()
         self._ids = itertools.count(1)
         self._cancelled: set[int] = set()
@@ -86,8 +90,8 @@ class ConversionQueue:
         self._watchdog.start()
 
     # -- public API (any thread) --------------------------------------------
-    def submit(self, src: Path, out_dir: Path | None) -> Job:
-        job = Job(next(self._ids), Path(src), out_dir)
+    def submit(self, src: Path, out_dir: Path | None, pdf_mode: PdfMode = PdfMode.BEST) -> Job:
+        job = Job(next(self._ids), Path(src), out_dir, PdfMode(pdf_mode))
         self._q.put(job)
         return job
 
@@ -129,9 +133,11 @@ class ConversionQueue:
             log.exception("update callback failed")
 
     def _kill_session(self) -> None:
+        self._killed = True
+        if self._converter is not None:
+            self._converter.kill()  # background pdf2docx process
         session = self._session
         if session is not None and hasattr(session, "kill"):
-            self._killed = True
             session.kill()
 
     def _watch(self) -> None:
@@ -149,7 +155,8 @@ class ConversionQueue:
         except Exception:  # noqa: BLE001
             log.exception("Could not start Microsoft Office")
             self._session = None
-        converter = Converter(self._session)
+        converter = Converter(self._session, alt_dir=self._alt_dir, timeout_s=self._timeout_s)
+        self._converter = converter
 
         try:
             while True:
@@ -163,11 +170,19 @@ class ConversionQueue:
                 job.state = State.WORKING
                 self._emit(job)
                 try:
-                    job.result = converter.convert(job.src, job.out_dir)
+                    job.result = converter.convert(job.src, job.out_dir, job.pdf_mode)
                     job.state = State.WARNING if job.result.warnings else State.DONE
                     job.message = " ".join(job.result.warnings)
+                    if self._killed:
+                        # Word was stopped (hung) but the other engine's result
+                        # was used. Word is dead now, so restart it.
+                        self._reset_session()
                 except Exception as exc:  # noqa: BLE001
                     self._handle_failure(job, exc)
+                    # After any failure Office may be hung, dead or holding a
+                    # half-open file. Restarting costs a few seconds and
+                    # guarantees a clean state.
+                    self._reset_session()
                 finally:
                     with self._lock:
                         self._current = None
@@ -193,8 +208,8 @@ class ConversionQueue:
             job.message = str(exc) if isinstance(exc, ConversionError) else f"Unexpected error: {exc}"
             if not isinstance(exc, ConversionError):
                 log.exception("Unexpected failure converting %s", job.src)
-        # After any failure Office may be hung, dead or holding a half-open
-        # file. Restarting costs a few seconds and guarantees a clean state.
+
+    def _reset_session(self) -> None:
         if self._session is not None and hasattr(self._session, "reset"):
             try:
                 self._session.reset()

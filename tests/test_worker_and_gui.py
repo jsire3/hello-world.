@@ -3,12 +3,13 @@ import time
 
 from conftest import FakeOffice
 
+from doc2word.converter import PdfMode
 from doc2word.worker import ConversionQueue, State
 
 FINISHED = {State.DONE, State.WARNING, State.FAILED, State.CANCELLED}
 
 
-def _run(jobs_src, office, timeout_s=30, out_dir=None):
+def _run(jobs_src, office, timeout_s=30, out_dir=None, mode=PdfMode.BEST):
     results = {}
     done = threading.Event()
 
@@ -20,7 +21,7 @@ def _run(jobs_src, office, timeout_s=30, out_dir=None):
 
     q = ConversionQueue(on_update, session_factory=lambda: office, timeout_s=timeout_s)
     for s in jobs_src:
-        q.submit(s, out_dir)
+        q.submit(s, out_dir, mode)
     assert done.wait(20), results
     q.shutdown()
     return results
@@ -42,11 +43,20 @@ def test_queue_mixed_outcomes(tmp_path, digital_pdf, scanned_pdf, png_file):
 def test_watchdog_kills_hung_office(digital_pdf, png_file):
     office = FakeOffice(hang_s=10)
     start = time.monotonic()
-    res = _run([digital_pdf, png_file], office, timeout_s=1)
+    res = _run([digital_pdf, png_file], office, timeout_s=1, mode=PdfMode.WORD)
     assert res["digital report.pdf"][0] == State.FAILED
     assert "longer than 1 seconds" in res["digital report.pdf"][1]
     assert res["photo.png"][0] == State.WARNING  # queue carried on
     assert time.monotonic() - start < 8
+
+
+def test_hung_word_falls_back_to_pdf2docx(digital_pdf):
+    office = FakeOffice(hang_s=10)
+    res = _run([digital_pdf], office, timeout_s=3)
+    state, message = res["digital report.pdf"]
+    assert state == State.WARNING
+    assert "pdf2docx's version was used" in message
+    assert office.resets == 1  # the killed Word gets restarted for the next file
 
 
 def test_gui_end_to_end(qapp_and_window, digital_pdf, png_file, tmp_path):

@@ -12,7 +12,8 @@ from pathlib import Path
 
 from . import __version__
 from .formats import expand_inputs
-from .logsetup import setup_logging
+from .converter import PdfMode
+from .logsetup import alternates_dir, setup_logging
 from .worker import ConversionQueue, Job, State
 
 FINISHED = {State.DONE, State.WARNING, State.FAILED, State.CANCELLED}
@@ -22,6 +23,10 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="doc2word-cli", description="Convert files to Word (.docx).")
     ap.add_argument("inputs", nargs="+", type=Path, help="files or folders")
     ap.add_argument("--out", type=Path, default=None, help="output folder (default: next to each file)")
+    ap.add_argument(
+        "--pdf-engine", choices=[m.value for m in PdfMode], default=PdfMode.BEST.value,
+        help="best = run Word and pdf2docx and keep the better result (default)",
+    )
     ap.add_argument("--timeout", type=float, default=300, help="seconds allowed per file")
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("--version", action="version", version=__version__)
@@ -45,6 +50,8 @@ def main(argv: list[str] | None = None) -> int:
         line = f"[{job.state.value}] {job.src}"
         if job.result:
             line += f" -> {job.result.output}"
+            if job.result.engine_summary:
+                line += f"  [{job.result.engine_summary}]"
         if job.message:
             line += f"\n    {job.message}"
         print(line, flush=True)
@@ -54,9 +61,9 @@ def main(argv: list[str] | None = None) -> int:
             if remaining == 0:
                 done.set()
 
-    q = ConversionQueue(on_update, timeout_s=args.timeout)
+    q = ConversionQueue(on_update, timeout_s=args.timeout, alt_dir=alternates_dir())
     for f in files:
-        q.submit(f, args.out)
+        q.submit(f, args.out, PdfMode(args.pdf_engine))
     try:
         done.wait()
     except KeyboardInterrupt:

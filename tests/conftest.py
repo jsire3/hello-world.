@@ -77,6 +77,26 @@ def ocrd_scan_pdf(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def table_pdf(tmp_path: Path) -> Path:
+    """Two text columns above a bordered 4x4 table - typical report page."""
+    path = tmp_path / "table report.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 60), "Quarterly Results", fontsize=20)
+    page.insert_textbox(pymupdf.Rect(72, 80, 290, 330), LOREM * 3, fontsize=10)
+    page.insert_textbox(pymupdf.Rect(305, 80, 523, 330), LOREM.replace("Revenue", "Profit") * 3, fontsize=10)
+    rows = [["Team", "Jan", "Feb", "Mar"], ["North", "10", "12", "14"],
+            ["South", "8", "9", "11"], ["West", "5", "7", "6"]]
+    for r, row in enumerate(rows):
+        for c, val in enumerate(row):
+            rect = pymupdf.Rect(72 + c * 110, 350 + r * 22, 72 + (c + 1) * 110, 350 + (r + 1) * 22)
+            page.draw_rect(rect, color=(0, 0, 0), width=0.8)
+            page.insert_text((rect.x0 + 4, rect.y1 - 7), val, fontsize=10)
+    doc.save(path)
+    return path
+
+
+@pytest.fixture
 def png_file(tmp_path: Path) -> Path:
     path = tmp_path / "photo.png"
     path.write_bytes(_scan_png(1600, 900))  # landscape
@@ -163,7 +183,7 @@ def fake_office() -> FakeOffice:
 
 
 @pytest.fixture
-def qapp_and_window():
+def qapp_and_window(tmp_path_factory):
     from PySide6.QtCore import QStandardPaths
     from PySide6.QtWidgets import QApplication
 
@@ -171,7 +191,7 @@ def qapp_and_window():
     app = QApplication.instance() or QApplication([])
     from doc2word.gui.main_window import MainWindow
 
-    win = MainWindow(session_factory=FakeOffice)
+    win = MainWindow(session_factory=FakeOffice, alt_dir=tmp_path_factory.mktemp("alt"))
     win.settings.clear()
     win.save_mode.setCurrentIndex(0)
     yield app, win

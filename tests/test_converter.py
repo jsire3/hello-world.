@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from docx import Document
 
-from doc2word.converter import Converter, _ranges, output_path_for, unique_path
+from doc2word.converter import Converter, PdfMode, _ranges, output_path_for, unique_path
 from doc2word.engines.base import ConversionError
 from doc2word.formats import Kind
 
@@ -32,7 +32,7 @@ def test_low_text_coverage_warns(digital_pdf):
             d.add_paragraph("only a little text")
             d.save(dest)
 
-    res = Converter(LossyOffice()).convert(digital_pdf)
+    res = Converter(LossyOffice(), pdf_mode=PdfMode.WORD).convert(digital_pdf)
     assert any("Only about" in w for w in res.warnings)
 
 
@@ -74,9 +74,15 @@ def test_images_need_no_office(png_file, jpg_file, multipage_tiff):
     assert len(Document(str(tiff.output)).inline_shapes) == 3
 
 
-def test_pdf_without_office_fails_clearly(digital_pdf):
+def test_pdf_without_office_uses_pdf2docx(digital_pdf, tmp_path):
+    res = Converter(None).convert(digital_pdf)
+    assert res.engine == "pdf2docx" and res.output.is_file()
     with pytest.raises(ConversionError, match="Microsoft Word is needed"):
-        Converter(None).convert(digital_pdf)
+        Converter(None, pdf_mode=PdfMode.WORD).convert(digital_pdf)
+    doc = tmp_path / "a.docx"
+    Document().save(doc)
+    with pytest.raises(ConversionError, match="Microsoft Word is needed"):
+        Converter(None).convert(doc)
 
 
 def test_errors(fake_office, tmp_path):

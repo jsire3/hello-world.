@@ -29,11 +29,20 @@ from PySide6.QtWidgets import (
 )
 
 from .. import APP_NAME, __version__
-from ..converter import describe
+from ..converter import PdfMode, Result, describe, save_alternate
+from ..engines.base import ConversionError
 from ..formats import SUPPORTED_EXTS, expand_inputs, is_supported
 from ..worker import ConversionQueue, Job, SessionFactory, State, default_session_factory
 
-COL_FILE, COL_TYPE, COL_STATUS, COL_NOTES = range(4)
+COL_FILE, COL_TYPE, COL_STATUS, COL_ENGINE, COL_NOTES = range(5)
+RESULT_ROLE = Qt.ItemDataRole.UserRole + 1
+
+# (label, mode) for the PDF engine picker - first is the default.
+PDF_MODES = [
+    ("Best of both (recommended)", PdfMode.BEST),
+    ("Word only (faster)", PdfMode.WORD),
+    ("pdf2docx only", PdfMode.PDF2DOCX),
+]
 READY = "Ready"
 
 STATE_COLORS = {
@@ -56,7 +65,7 @@ FILE_FILTER = (
 class _Bridge(QObject):
     """Carries job updates from the worker thread to the GUI thread."""
 
-    updated = Signal(int, str, str, str, str)  # id, state, message, output, detail
+    updated = Signal(int, object)  # job id, dict of plain values
 
 
 class DropZone(QFrame):
@@ -118,7 +127,11 @@ QPushButton#Primary { font-weight: 600; padding: 6px 18px; }
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, session_factory: SessionFactory = default_session_factory):
+    def __init__(
+        self,
+        session_factory: SessionFactory = default_session_factory,
+        alt_dir: Path | None = None,
+    ):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} - Convert to Word")
         self.resize(920, 600)
@@ -132,7 +145,11 @@ class MainWindow(QMainWindow):
 
         self._bridge = _Bridge()
         self._bridge.updated.connect(self._on_job_updated)
-        self.queue = ConversionQueue(self._from_worker, session_factory=session_factory)
+        if alt_dir is None:
+            from ..logsetup import alternates_dir
+
+            alt_dir = alternates_dir()
+        self.queue = ConversionQueue(self._from_worker, session_factory=session_factory, alt_dir=alt_dir)
 
         self._build_ui()
         self._load_settings()
@@ -173,7 +190,7 @@ class MainWindow(QMainWindow):
         root.addLayout(add_row)
 
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["File", "Type", "Status", "Notes"])
+        self.tree.setHeaderLabels(["File", "Type", "Status", "Engine", "Notes"])
         self.tree.setRootIsDecorated(False)
         self.tree.setAlternatingRowColors(True)
         self.tree.setUniformRowHeights(True)
@@ -187,6 +204,7 @@ class MainWindow(QMainWindow):
         self.tree.setColumnWidth(COL_FILE, 300)
         self.tree.setColumnWidth(COL_TYPE, 150)
         self.tree.setColumnWidth(COL_STATUS, 120)
+        self.tree.setColumnWidth(COL_ENGINE, 110)
         root.addWidget(self.tree, 1)
 
         opts = QHBoxLayout()
@@ -198,6 +216,19 @@ class MainWindow(QMainWindow):
         self.folder_label = QLabel()
         self.folder_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         opts.addWidget(self.folder_label, 1)
+        opts.addSpacing(12)
+        opts.addWidget(QLabel("PDF engine:"))
+        self.pdf_mode = QComboBox()
+        for label, _mode in PDF_MODES:
+            self.pdf_mode.addItem(label)
+        self.pdf_mode.setToolTip(
+            "Best of both: converts each PDF with Word and with pdf2docx at the same time,\n"
+            "then keeps whichever kept more of the text, layout and tables.\n"
+            "The other version can still be saved from the right-click menu."
+        )
+        self.pdf_mode.activated.connect(lambda _i: self._save_settings())
+        opts.addWidget(self.pdf_mode)
+        opts.addSpacing(12)
         self.open_when_done = QCheckBox("Open when finished")
         opts.addWidget(self.open_when_done)
         root.addLayout(opts)
@@ -226,8 +257,8 @@ class MainWindow(QMainWindow):
 
         if not office_available():
             self.banner.setText(
-                "Microsoft Word wasn't found on this PC. Images can still be converted, "
-                "but PDFs and Office files need Word installed."
+                "Microsoft Word wasn't found on this PC. PDFs (using pdf2docx) and images can "
+                "still be converted, but Word, Excel and PowerPoint files need Office installed."
             )
             self.banner.show()
 
@@ -239,12 +270,16 @@ class MainWindow(QMainWindow):
             mode = 0
         self.save_mode.setCurrentIndex(mode)
         self.open_when_done.setChecked(self.settings.value("open_when_done", True, bool))
+        saved_mode = self.settings.value("pdf_mode", PdfMode.BEST.value, str)
+        modes = [m.value for _l, m in PDF_MODES]
+        self.pdf_mode.setCurrentIndex(modes.index(saved_mode) if saved_mode in modes else 0)
         self._update_folder_label()
 
     def _save_settings(self) -> None:
         self.settings.setValue("out_dir", self._out_dir)
         self.settings.setValue("save_mode", self.save_mode.currentIndex())
         self.settings.setValue("open_when_done", self.open_when_done.isChecked())
+        self.settings.setValue("pdf_mode", self._current_pdf_mode().value)
 
     def _on_save_mode(self, index: int) -> None:
         if index == 1:
@@ -261,6 +296,9 @@ class MainWindow(QMainWindow):
             self.folder_label.setText(self._out_dir)
         else:
             self.folder_label.setText("")
+
+    def _current_pdf_mode(self) -> PdfMode:
+        return PDF_MODES[max(self.pdf_mode.currentIndex(), 0)][1]
 
     def _current_out_dir(self) -> Path | None:
         return Path(self._out_dir) if self.save_mode.currentIndex() == 1 and self._out_dir else None
@@ -288,7 +326,7 @@ class MainWindow(QMainWindow):
             if str(f) in already:
                 continue
             _kind, detail = describe(f)
-            item = QTreeWidgetItem([f.name, detail, READY, ""])
+            item = QTreeWidgetItem([f.name, detail, READY, "", ""])
             item.setToolTip(COL_FILE, str(f))
             item.setData(COL_FILE, Qt.ItemDataRole.UserRole, str(f))
             item.setIcon(COL_FILE, self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon))
@@ -317,7 +355,7 @@ class MainWindow(QMainWindow):
             self._batch_outputs, self._batch_size = [], 0
         for item in self._pending:
             src = Path(item.data(COL_FILE, Qt.ItemDataRole.UserRole))
-            job = self.queue.submit(src, out_dir)
+            job = self.queue.submit(src, out_dir, self._current_pdf_mode())
             self._items[job.id] = item
             self._set_state(item, State.QUEUED)
             self._batch_size += 1
@@ -330,24 +368,33 @@ class MainWindow(QMainWindow):
         self.queue.cancel_all()
 
     def _from_worker(self, job: Job) -> None:
-        # Runs on the worker thread: copy plain values and hop to the GUI thread.
-        out = str(job.result.output) if job.result else ""
-        detail = job.result.detail if job.result else ""
-        self._bridge.updated.emit(job.id, job.state.value, job.message, out, detail)
+        # Runs on the worker thread: snapshot the values and hop to the GUI
+        # thread (the Result is finished and no longer touched by the worker).
+        self._bridge.updated.emit(job.id, {
+            "state": job.state, "message": job.message, "result": job.result,
+        })
 
-    def _on_job_updated(self, job_id: int, state: str, message: str, output: str, detail: str) -> None:
+    def _on_job_updated(self, job_id: int, data: dict) -> None:
         item = self._items.get(job_id)
         if item is None:
             return
-        st = State(state)
+        st: State = data["state"]
+        result: Result | None = data["result"]
         self._set_state(item, st)
-        item.setText(COL_NOTES, message)
-        item.setToolTip(COL_NOTES, message)
-        if detail:
-            item.setText(COL_TYPE, detail)
-        if output:
+        item.setText(COL_NOTES, data["message"])
+        item.setToolTip(COL_NOTES, data["message"])
+        if result is not None:
+            output = str(result.output)
             item.setData(COL_STATUS, Qt.ItemDataRole.UserRole, output)
+            item.setData(COL_STATUS, RESULT_ROLE, result)
             item.setToolTip(COL_STATUS, f"Saved as {output}\nDouble-click to open")
+            if result.detail:
+                item.setText(COL_TYPE, result.detail)
+            item.setText(COL_ENGINE, result.engine)
+            tip = result.engine_summary
+            if result.scores:
+                tip = "\n".join(f"{n}: {sc.describe()}" for n, sc in result.scores.items())
+            item.setToolTip(COL_ENGINE, tip)
             self._batch_outputs.append(output)
         if st in (State.DONE, State.WARNING, State.FAILED, State.CANCELLED):
             self._maybe_finish_batch()
@@ -424,16 +471,34 @@ class MainWindow(QMainWindow):
         a_open.triggered.connect(lambda: self._open_output(item))
         a_show = QAction("Show in folder", self, enabled=bool(out and out.exists()))
         a_show.triggered.connect(lambda: _reveal(out))
+        result: Result | None = item.data(COL_STATUS, RESULT_ROLE)
+        a_alt = None
+        if result is not None and result.alternate_engine:
+            a_alt = QAction(
+                f"Save the {result.alternate_engine} version too", self,
+                enabled=bool(result.alternate and result.alternate.is_file()),
+            )
+            a_alt.triggered.connect(lambda: self._save_alternate(result))
         a_orig = QAction("Open original", self)
         a_orig.triggered.connect(lambda: _open_path(src))
         a_remove = QAction("Remove from list", self, enabled=item.text(COL_STATUS) not in
                            (State.QUEUED.value, State.WORKING.value))
         a_remove.triggered.connect(lambda: self._remove(item))
-        for a in (a_open, a_show, a_orig):
-            menu.addAction(a)
+        for a in (a_open, a_show, a_alt, a_orig):
+            if a is not None:
+                menu.addAction(a)
         menu.addSeparator()
         menu.addAction(a_remove)
         menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def _save_alternate(self, result: Result) -> None:
+        try:
+            path = save_alternate(result)
+        except (ConversionError, OSError) as exc:
+            QMessageBox.warning(self, APP_NAME, str(exc))
+            return
+        self.summary.setText(f"Saved {path.name}")
+        _open_path(path)
 
     def _remove(self, item: QTreeWidgetItem) -> None:
         if item in self._pending:

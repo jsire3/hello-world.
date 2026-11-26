@@ -9,12 +9,22 @@ from pathlib import Path
 from . import APP_NAME
 
 
-def log_dir() -> Path:
+def data_dir() -> Path:
+    """Per-user app data: %LOCALAPPDATA%\\Doc2Word on Windows."""
     if sys.platform == "win32":
         base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
     else:
         base = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
-    return base / APP_NAME / "logs"
+    return base / APP_NAME
+
+
+def log_dir() -> Path:
+    return data_dir() / "logs"
+
+
+def alternates_dir() -> Path:
+    """Where the losing engine's result is kept for a week."""
+    return data_dir() / "alternates"
 
 
 def setup_logging(verbose: bool = False) -> None:

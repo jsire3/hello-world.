@@ -10,13 +10,13 @@ ICON = str(ROOT / "packaging" / "doc2word.ico")
 
 hidden = [
     "win32com", "win32com.client", "pythoncom", "pywintypes", "win32timezone",
-    "pillow_heif",
+    "pillow_heif", "pdf2docx", "doc2word.engines.pdf2docx_engine",
 ]
 # Big Qt modules we never use - keeps the install much smaller.
 excludes = [
     "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.Qt3DCore",
     "PySide6.QtQuick", "PySide6.QtQml", "PySide6.QtMultimedia", "PySide6.QtCharts",
-    "PySide6.QtDataVisualization", "PySide6.QtPdf", "tkinter", "unittest", "pytest",
+    "PySide6.QtDataVisualization", "PySide6.QtPdf", "tkinter", "pytest",
 ]
 
 
